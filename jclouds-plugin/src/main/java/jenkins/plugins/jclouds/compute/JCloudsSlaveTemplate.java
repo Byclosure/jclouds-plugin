@@ -554,18 +554,17 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
                 final String credential = JCloudsCloud.getKeyPrivateKey(cloudManagerKeyId);
 
                 final Set<? extends Image> images = listImages(providerName, identity, credential, endPointUrl, zones);
-                return FormValidation.ok("Image Name Regex is valid: YEAH!");
-//                if (images != null) {
-//                    for (final Image image : images) {
-//                        if (image.getName().matches(imageNameRegex)) {
-//                            return FormValidation.ok("Image Name Regex is valid.");
-//                        }
-//                    }
-//                }
+                if (images != null) {
+                    for (final Image image : images) {
+                        if (image.getName().matches(imageNameRegex)) {
+                            return FormValidation.ok("Image Name Regex is valid.");
+                        }
+                    }
+                }
             } catch (Exception ex) {
                 return FormValidation.error("Unable to check the image name regex, " + "please check if the credentials you provided are correct.", ex);
             }
-//            return FormValidation.error("Invalid Image Name Regex, please check the value and try again.");
+            return FormValidation.error("Invalid Image Name Regex, please check the value and try again.");
         }
 
         private FormValidation validateComputeContextParameters(@QueryParameter String providerName, @QueryParameter String cloudManagerKeyId,
@@ -591,9 +590,9 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
                 computeService = JCloudsCloud.ctx(providerName, identity, credential, endPointUrl, zones).getComputeService();
                 return computeService.listImages();
             } finally {
-//                if (computeService != null) {
-//                    computeService.getContext().close();
-//                }
+                if (computeService != null) {
+                    computeService.getContext().close();
+                }
             }
         }
 
