@@ -23,7 +23,7 @@
           <f:select />
         </f:entry>
         <f:validateButton title="${%Check Hardware Id}" progress="${%Checking...}" method="validateHardwareId"
-                            with="providerName,identity,credential,endPointUrl,hardwareId"/>
+                            with="providerName,cloudManagerKeyId,endPointUrl,hardwareId"/>
       </f:radioBlock>
       
       <f:radioBlock inline="true" name="jclouds.useHardwareId" value="false"
@@ -46,7 +46,7 @@
         </f:entry>
         
         <f:validateButton title="${%Check Image Id}" progress="${%Checking...}" method="validateImageId"
-                          with="providerName,identity,credential,endPointUrl,imageId"/>
+                          with="providerName,cloudManagerKeyId,endPointUrl,imageId"/>
       </f:radioBlock>
 
       <f:radioBlock inline="true" name="jclouds.imageSelectionOption" value="imageNameRegex"
@@ -56,7 +56,7 @@
         </f:entry>
 
         <f:validateButton title="${%Check Image Name Regex}" progress="${%Checking...}" method="validateImageNameRegex"
-                          with="providerName,identity,credential,endPointUrl,imageNameRegex"/>
+                          with="providerName,cloudManagerKeyId,endPointUrl,imageNameRegex"/>
       </f:radioBlock>
 
       <f:radioBlock inline="true" name="jclouds.imageSelectionOption" value="osFamilyAndVersion"
@@ -77,7 +77,7 @@
           <f:select />
         </f:entry>
         <f:validateButton title="${%Check Location Id}" progress="${%Checking...}" method="validateLocationId"
-                          with="providerName,identity,credential,endPointUrl,locationId"/>
+                          with="providerName,cloudManagerKeyId,endPointUrl,locationId"/>
       </f:section>
       <f:section title="${%General Options}">
         <f:entry title="${%Override Retention Time}" field="overrideRetentionTime">
