@@ -129,42 +129,50 @@ public class JCloudsCloud extends Cloud {
         return cloudGlobalKeyId;
     }
 
+    public String getCloudManagerKeyId() {
+        return cloudManagerKeyId;
+    }
+
     public void setCloudGlobalKeyId(final String value) {
         cloudGlobalKeyId = value;
     }
 
     public String getGlobalPrivateKey() {
-        final SSHUserPrivateKey supk = getSshUserPrivateKey(cloudGlobalKeyId);
+        final SSHUserPrivateKey supk = (SSHUserPrivateKey)getCredential(cloudGlobalKeyId);
         if (null != supk) {
             return supk.getPrivateKey();
         }
         return "";
     }
 
-    public static String getKeyPrivateKey(String keyId) {
-        final SSHUserPrivateKey supk = getSshUserPrivateKey(keyId);
+    public static String getKeyPassword(String keyId) {
+        final StandardUsernameCredentials supk = getCredential(keyId);
         if (null != supk) {
-            return supk.getPrivateKey();
+            if(supk instanceof SSHUserPrivateKey) {
+                return ((SSHUserPrivateKey)supk).getPrivateKey();
+            } else if(supk instanceof StandardUsernamePasswordCredentials) {
+                return ((StandardUsernamePasswordCredentials)supk).getPassword().getPlainText();
+            }
         }
         return "";
     }
 
     public static String getKeyUsername(String keyId) {
-        final SSHUserPrivateKey supk = getSshUserPrivateKey(keyId);
+        final StandardUsernameCredentials supk = getCredential(keyId);
         if (null != supk) {
             return supk.getUsername();
         }
         return "";
     }
 
-    private static SSHUserPrivateKey getSshUserPrivateKey(String keyId) {
+    private static StandardUsernameCredentials getCredential(String keyId) {
         if (Strings.isNullOrEmpty(keyId)) {
             return null;
         }
 
         return CredentialsMatchers.firstOrNull(
-                    CredentialsProvider.lookupCredentials(SSHUserPrivateKey.class, Hudson.getInstance(), ACL.SYSTEM, null),
-                    CredentialsMatchers.withId(keyId));
+                CredentialsProvider.lookupCredentials(StandardUsernameCredentials.class, Hudson.getInstance(), ACL.SYSTEM, null),
+                CredentialsMatchers.withId(keyId));
     }
 
     public String getGlobalPublicKey() {
@@ -233,7 +241,7 @@ public class JCloudsCloud extends Cloud {
         // correct the classloader so that extensions can be found
         Thread.currentThread().setContextClassLoader(Apis.class.getClassLoader());
         return ContextBuilder.newBuilder(providerName).credentials(identity, credential).overrides(overrides).modules(MODULES)
-            .buildView(ComputeServiceContext.class);
+                .buildView(ComputeServiceContext.class);
     }
 
     public ComputeService getCompute() {
@@ -248,7 +256,7 @@ public class JCloudsCloud extends Cloud {
             if (startTimeout > 0) {
                 overrides.setProperty(ComputeServiceProperties.TIMEOUT_NODE_RUNNING, String.valueOf(startTimeout));
             }
-            this.compute = ctx(this.providerName, getKeyUsername(cloudManagerKeyId), getKeyPrivateKey(cloudManagerKeyId), overrides, this.zones).getComputeService();
+            this.compute = ctx(this.providerName, getKeyUsername(cloudManagerKeyId), getKeyPassword(cloudManagerKeyId), overrides, this.zones).getComputeService();
         }
         return compute;
     }
@@ -417,7 +425,7 @@ public class JCloudsCloud extends Cloud {
             // Remove empty text/whitespace from the fields.
             providerName = Util.fixEmptyAndTrim(providerName);
             final String identity = getKeyUsername(cloudManagerKeyId);
-            final String credential = getKeyPrivateKey(cloudManagerKeyId);
+            final String credential = getKeyPassword(cloudManagerKeyId);
             endPointUrl = Util.fixEmptyAndTrim(endPointUrl);
             zones = Util.fixEmptyAndTrim(zones);
 

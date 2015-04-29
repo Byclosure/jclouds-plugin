@@ -4,16 +4,34 @@ import java.io.IOException;
 import java.util.Properties;
 import java.util.logging.Logger;
 
+import hudson.util.ListBoxModel;
+import org.kohsuke.stapler.AncestorInPath;
+import hudson.model.ItemGroup;
 import shaded.com.google.common.collect.ImmutableSet;
 import com.google.inject.Module;
 import hudson.FilePath;
 import org.jclouds.ContextBuilder;
 import org.jclouds.apis.Apis;
+import shaded.com.google.common.base.Strings;
+import hudson.model.Computer;
+import hudson.security.AccessControlled;
 import org.jclouds.blobstore.BlobStore;
 import org.jclouds.blobstore.BlobStoreContext;
 import org.jclouds.blobstore.domain.Blob;
 import org.jclouds.enterprise.config.EnterpriseConfigurationModule;
 import org.kohsuke.stapler.DataBoundConstructor;
+import hudson.security.ACL;
+import com.cloudbees.plugins.credentials.CredentialsScope;
+import com.cloudbees.plugins.credentials.CredentialsMatchers;
+import hudson.model.Hudson;
+import jenkins.model.Jenkins;
+import com.cloudbees.plugins.credentials.common.StandardUsernameListBoxModel;
+import com.cloudbees.plugins.credentials.common.StandardUsernameCredentials;
+import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials;
+import com.cloudbees.jenkins.plugins.sshcredentials.SSHUserPrivateKey;
+import com.cloudbees.plugins.credentials.common.StandardUsernameCredentials;
+import com.cloudbees.plugins.credentials.CredentialsProvider;
+
 
 /**
  * Model class for Blobstore profile. User can configure multiple profiles to upload artifacts to different providers.
@@ -26,15 +44,24 @@ public class BlobStoreProfile {
 
     private String profileName;
     private String providerName;
-    private String identity;
-    private String credential;
+    private String cloudManagerKeyId;
 
     @DataBoundConstructor
-    public BlobStoreProfile(final String profileName, final String providerName, final String identity, final String credential) {
+    public BlobStoreProfile(final String profileName, final String providerName, final String cloudManagerKeyId) {
+        System.out.println("[" + profileName + ", " + providerName + ", " + cloudManagerKeyId + "]");
         this.profileName = profileName;
         this.providerName = providerName;
-        this.identity = identity;
-        this.credential = credential;
+        this.cloudManagerKeyId = cloudManagerKeyId;
+    }
+
+    private static StandardUsernameCredentials getCredential(String keyId) {
+        if (Strings.isNullOrEmpty(keyId)) {
+            return null;
+        }
+
+        return CredentialsMatchers.firstOrNull(
+                CredentialsProvider.lookupCredentials(StandardUsernameCredentials.class, Hudson.getInstance(), ACL.SYSTEM, null),
+                CredentialsMatchers.withId(keyId));
     }
 
     /**
@@ -61,7 +88,15 @@ public class BlobStoreProfile {
      * @return
      */
     public String getIdentity() {
-        return identity;
+        final StandardUsernameCredentials supk = getCredential(cloudManagerKeyId);
+        if (null != supk) {
+            return supk.getUsername();
+        }
+        return "";
+    }
+
+    public String getCloudManagerKeyId() {
+        return cloudManagerKeyId;
     }
 
     /**
@@ -70,7 +105,15 @@ public class BlobStoreProfile {
      * @return
      */
     public String getCredential() {
-        return credential;
+        final StandardUsernameCredentials supk = getCredential(cloudManagerKeyId);
+        if (null != supk) {
+            if(supk instanceof SSHUserPrivateKey) {
+                return ((SSHUserPrivateKey)supk).getPrivateKey();
+            } else if(supk instanceof StandardUsernamePasswordCredentials) {
+                return ((StandardUsernamePasswordCredentials)supk).getPassword().getPlainText();
+            }
+        }
+        return "";
     }
 
     static final Iterable<Module> MODULES = ImmutableSet.<Module>of(new EnterpriseConfigurationModule());
@@ -97,7 +140,7 @@ public class BlobStoreProfile {
         // correct the classloader so that extensions can be found
         Thread.currentThread().setContextClassLoader(Apis.class.getClassLoader());
         // TODO: endpoint
-        final BlobStoreContext context = ctx(this.providerName, this.identity, this.credential, new Properties());
+        final BlobStoreContext context = ctx(this.providerName, getIdentity(), getCredential(), new Properties());
         try {
             final BlobStore blobStore = context.getBlobStore();
             if (!blobStore.containerExists(container)) {
