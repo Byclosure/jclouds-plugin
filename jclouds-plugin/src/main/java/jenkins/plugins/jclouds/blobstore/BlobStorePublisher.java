@@ -247,17 +247,12 @@ public class BlobStorePublisher extends Recorder implements Describable<Publishe
 
         @Override
         public boolean configure(StaplerRequest req, net.sf.json.JSONObject json) throws FormException {
-            System.out.println(json.toString());
             profiles.replaceBy(req.bindJSONToList(BlobStoreProfile.class, json.get("profile")));
             save();
             return true;
         }
 
         public BlobStoreProfile[] getProfiles() {
-            for(BlobStoreProfile profile : profiles) {
-
-                System.out.println(profile.getProfileName() + " " + profile.getProviderName());
-            }
             return profiles.toArray(new BlobStoreProfile[0]);
         }
 

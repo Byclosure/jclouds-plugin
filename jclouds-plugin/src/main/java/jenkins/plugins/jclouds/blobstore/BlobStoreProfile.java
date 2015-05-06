@@ -48,7 +48,6 @@ public class BlobStoreProfile {
 
     @DataBoundConstructor
     public BlobStoreProfile(final String profileName, final String providerName, final String cloudManagerKeyId) {
-        System.out.println("[" + profileName + ", " + providerName + ", " + cloudManagerKeyId + "]");
         this.profileName = profileName;
         this.providerName = providerName;
         this.cloudManagerKeyId = cloudManagerKeyId;
