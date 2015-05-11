@@ -1,5 +1,8 @@
 package jenkins.plugins.jclouds.blobstore;
 
+import org.kohsuke.stapler.AncestorInPath;
+import hudson.model.ItemGroup;
+
 import hudson.Extension;
 import hudson.FilePath;
 import hudson.Launcher;
@@ -20,6 +23,14 @@ import org.apache.commons.lang.StringUtils;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.StaplerRequest;
 import org.kohsuke.stapler.StaplerResponse;
+
+import com.cloudbees.plugins.credentials.common.StandardUsernameCredentials;
+import com.cloudbees.plugins.credentials.CredentialsProvider;
+import hudson.security.ACL;
+import jenkins.model.Jenkins;
+import com.cloudbees.plugins.credentials.common.StandardUsernameListBoxModel;
+import hudson.model.Computer;
+import hudson.security.AccessControlled;
 
 import org.jclouds.rest.AuthorizationException;
 
@@ -236,7 +247,7 @@ public class BlobStorePublisher extends Recorder implements Describable<Publishe
 
         @Override
         public boolean configure(StaplerRequest req, net.sf.json.JSONObject json) throws FormException {
-            profiles.replaceBy(req.bindParametersToList(BlobStoreProfile.class, "jcblobstore."));
+            profiles.replaceBy(req.bindJSONToList(BlobStoreProfile.class, json.get("profile")));
             save();
             return true;
         }
@@ -250,8 +261,7 @@ public class BlobStorePublisher extends Recorder implements Describable<Publishe
             if (name == null) {// name is not entered yet
                 return FormValidation.ok();
             }
-            BlobStoreProfile profile = new BlobStoreProfile(name, req.getParameter("providerName"), req.getParameter("identity"),
-                    req.getParameter("credential"));
+            BlobStoreProfile profile = new BlobStoreProfile(name, req.getParameter("providerName"), req.getParameter("cloudManagerKeyId"));
             return FormValidation.ok();
         }
 
@@ -266,6 +276,14 @@ public class BlobStorePublisher extends Recorder implements Describable<Publishe
                 model.add(profile.getProfileName());
             }
             return model;
+        }
+
+        public ListBoxModel doFillCloudManagerKeyIdItems(@AncestorInPath ItemGroup context) {
+            if (!(context instanceof AccessControlled ? (AccessControlled) context : Jenkins.getInstance()).hasPermission(Computer.CONFIGURE)) {
+                return new ListBoxModel();
+            }
+            return new StandardUsernameListBoxModel()
+                    .withAll(CredentialsProvider.lookupCredentials(StandardUsernameCredentials.class, context, ACL.SYSTEM, null));
         }
     }
 }

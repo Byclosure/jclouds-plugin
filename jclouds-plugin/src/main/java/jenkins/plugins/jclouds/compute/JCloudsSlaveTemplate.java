@@ -9,12 +9,11 @@ import static java.util.Collections.sort;
 import java.io.IOException;
 import java.io.StringReader;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import org.apache.commons.codec.binary.Base64;
 
 import hudson.Extension;
 import hudson.RelativePath;
@@ -24,6 +23,7 @@ import hudson.model.Describable;
 import hudson.model.Computer;
 import hudson.model.Descriptor;
 import hudson.model.Label;
+import hudson.model.Hudson;
 import hudson.model.ItemGroup;
 import hudson.model.TaskListener;
 import hudson.model.labels.LabelAtom;
@@ -33,6 +33,7 @@ import hudson.security.AccessControlled;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
 import hudson.util.Secret;
+
 import jenkins.model.Jenkins;
 
 import org.apache.commons.lang.StringUtils;
@@ -52,7 +53,6 @@ import org.jclouds.openstack.nova.v2_0.compute.options.NovaTemplateOptions;
 import org.jclouds.predicates.validators.DnsNameValidator;
 import org.jclouds.scriptbuilder.domain.Statement;
 import org.jclouds.scriptbuilder.domain.Statements;
-import org.jclouds.scriptbuilder.statements.java.InstallJDK;
 import org.jclouds.scriptbuilder.statements.login.AdminAccess;
 import org.kohsuke.stapler.AncestorInPath;
 import org.kohsuke.stapler.DataBoundConstructor;
@@ -63,12 +63,28 @@ import shaded.com.google.common.base.Strings;
 import shaded.com.google.common.base.Supplier;
 import shaded.com.google.common.collect.ImmutableMap;
 
-import com.cloudbees.plugins.credentials.common.StandardUsernameCredentials;
-import com.cloudbees.plugins.credentials.common.StandardUsernameListBoxModel;
+import com.cloudbees.plugins.credentials.Credentials;
+import com.cloudbees.plugins.credentials.CredentialsMatcher;
+import com.cloudbees.plugins.credentials.CredentialsMatchers;
 import com.cloudbees.plugins.credentials.CredentialsProvider;
+import com.cloudbees.plugins.credentials.CredentialsScope;
+import com.cloudbees.plugins.credentials.CredentialsStore;
+import com.cloudbees.plugins.credentials.common.StandardUsernameCredentials;
+import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials;
+import com.cloudbees.plugins.credentials.common.StandardUsernameListBoxModel;
+import com.cloudbees.plugins.credentials.domains.Domain;
+import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl;
+
 import com.cloudbees.jenkins.plugins.sshcredentials.SSHAuthenticator;
+import com.cloudbees.jenkins.plugins.sshcredentials.SSHUserPrivateKey;
+import com.cloudbees.jenkins.plugins.sshcredentials.impl.BasicSSHUserPrivateKey;
+
+import org.acegisecurity.context.SecurityContext;
+import org.acegisecurity.context.SecurityContextHolder;
 
 import com.trilead.ssh2.Connection;
+
+import jenkins.plugins.jclouds.internal.SSHPublicKeyExtractor;
 
 /**
  * @author Vijay Kiran
@@ -93,12 +109,11 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
     public final String userData;
     public final String numExecutors;
     public final boolean stopOnTerminate;
-    public final String vmUser;
-    public final String vmPassword;
-    public final boolean preInstalledJava;
+    private transient String vmUser;  // Not used anymore, but retained for backward compatibility.
+    private transient String vmPassword; // Not used anymore, but retained for backward compatibility.
     private final String jvmOptions;
     public final boolean preExistingJenkinsUser;
-    private final String jenkinsUser;
+    private transient String jenkinsUser; // Not used anymore, but retained for backward compatibility.
     private final String fsRoot;
     public final boolean allowSudo;
     public final boolean installPrivateKey;
@@ -112,20 +127,37 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
     public final boolean assignPublicIp;
     public final String networks;
     public final String securityGroups;
-    public final String credentialsId;
+    private String credentialsId;
+    private String adminCredentialsId;
 
     private transient Set<LabelAtom> labelSet;
 
     protected transient JCloudsCloud cloud;
 
+    public void setCredentialsId(final String value) {
+        credentialsId = value;
+    }
+
+    public String getCredentialsId() {
+        return credentialsId;
+    }
+
+    public void setAdminCredentialsId(final String value) {
+        adminCredentialsId = value;
+    }
+
+    public String getAdminCredentialsId() {
+        return adminCredentialsId;
+    }
+
     @DataBoundConstructor
     public JCloudsSlaveTemplate(final String name, final String imageId, final String imageNameRegex, final String hardwareId, final double cores,
                                 final int ram, final String osFamily, final String osVersion, final String locationId, final String labelString, final String description,
-                                final String initScript, final String userData, final String numExecutors, final boolean stopOnTerminate, final String vmPassword,
-                                final String vmUser, final boolean preInstalledJava, final String jvmOptions, final boolean preExistingJenkinsUser,
+                                final String initScript, final String userData, final String numExecutors, final boolean stopOnTerminate,
+                                final String jvmOptions, final boolean preExistingJenkinsUser,
                                 final String fsRoot, final boolean allowSudo, final boolean installPrivateKey, final int overrideRetentionTime, final int spoolDelayMs,
                                 final boolean assignFloatingIp, final boolean waitPhoneHome, final int waitPhoneHomeTimeout, final String keyPairName,
-                                final boolean assignPublicIp, final String networks, final String securityGroups, final String credentialsId) {
+                                final boolean assignPublicIp, final String networks, final String securityGroups, final String credentialsId, final String adminCredentialsId) {
 
         this.name = Util.fixEmptyAndTrim(name);
         this.imageId = Util.fixEmptyAndTrim(imageId);
@@ -141,7 +173,6 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
         this.initScript = Util.fixNull(initScript);
         this.userData = Util.fixNull(userData);
         this.numExecutors = Util.fixNull(numExecutors);
-        this.preInstalledJava = preInstalledJava;
         this.jvmOptions = Util.fixEmptyAndTrim(jvmOptions);
         this.stopOnTerminate = stopOnTerminate;
 
@@ -158,11 +189,11 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
         this.assignPublicIp = assignPublicIp;
         this.networks = networks;
         this.securityGroups = securityGroups;
-        this.credentialsId = credentialsId;
-        jenkinsUser = (null == credentialsId) ? "" : SSHLauncher.lookupSystemCredentials(credentialsId).getUsername();
-        this.vmPassword = Util.fixEmptyAndTrim(vmPassword);
-        this.vmUser = Util.fixEmptyAndTrim(vmUser);
+        this.credentialsId = Util.fixEmptyAndTrim(credentialsId);
+        this.adminCredentialsId = Util.fixEmptyAndTrim(adminCredentialsId);
         readResolve();
+        this.vmPassword = null; // Not used anymore, but retained for backward compatibility.
+        this.vmUser = null; // Not used anymore, but retained for backward compatibility.
     }
 
     public JCloudsCloud getCloud() {
@@ -178,10 +209,50 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
     }
 
     public String getJenkinsUser() {
-        if (jenkinsUser == null || jenkinsUser.equals("")) {
+        if (!Strings.isNullOrEmpty(jenkinsUser)) {
+            return jenkinsUser;
+        }
+        if (Strings.isNullOrEmpty(credentialsId)
+                || null == SSHLauncher.lookupSystemCredentials(credentialsId)
+                || null == Util.fixEmptyAndTrim(SSHLauncher.lookupSystemCredentials(credentialsId).getUsername())) {
             return "jenkins";
         } else {
-            return jenkinsUser;
+            return SSHLauncher.lookupSystemCredentials(credentialsId).getUsername();
+        }
+    }
+
+    public String getJenkinsPrivateKey() {
+        if (Strings.isNullOrEmpty(credentialsId)) {
+            return getCloud().getGlobalPrivateKey();
+        }
+        SSHUserPrivateKey supk = CredentialsMatchers.firstOrNull(
+                CredentialsProvider.lookupCredentials(SSHUserPrivateKey.class, Hudson.getInstance(), ACL.SYSTEM, null),
+                CredentialsMatchers.withId(credentialsId));
+        if (null != supk) {
+            return supk.getPrivateKey();
+        }
+        return "";
+    }
+
+    public String getJenkinsPublicKey() {
+        try {
+            return SSHPublicKeyExtractor.extract(getJenkinsPrivateKey(), null);
+        } catch (IOException e) {
+            LOGGER.warning(String.format("Error while extracting public key: %s", e));
+        }
+        return "";
+    }
+
+    public String getAdminUser() {
+        if (!Strings.isNullOrEmpty(vmUser)) {
+            return vmUser;
+        }
+        if (Strings.isNullOrEmpty(adminCredentialsId)
+                || null == SSHLauncher.lookupSystemCredentials(adminCredentialsId)
+                || null == Util.fixEmptyAndTrim(SSHLauncher.lookupSystemCredentials(adminCredentialsId).getUsername())) {
+            return "root";
+        } else {
+            return SSHLauncher.lookupSystemCredentials(credentialsId).getUsername();
         }
     }
 
@@ -242,7 +313,7 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
                 templateBuilder.osVersionMatches(osVersion);
             }
         }
-        if (!Strings.isNullOrEmpty((hardwareId))) {
+        if (!Strings.isNullOrEmpty(hardwareId)) {
             LOGGER.info("Setting hardware Id to " + hardwareId);
             templateBuilder.hardwareId(hardwareId);
         } else {
@@ -272,7 +343,7 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             options.as(NovaTemplateOptions.class).autoAssignFloatingIp(true);
         }
 
-        if (!Strings.isNullOrEmpty((keyPairName)) && options instanceof NovaTemplateOptions) {
+        if (!Strings.isNullOrEmpty(keyPairName) && options instanceof NovaTemplateOptions) {
             LOGGER.info("Setting keyPairName to " + keyPairName);
             options.as(NovaTemplateOptions.class).keyPairName(keyPairName);
         }
@@ -286,18 +357,20 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             options.as(CloudStackTemplateOptions.class).setupStaticNat(assignPublicIp);
         }
 
-        String adminUser = vmUser;
-        if (this.preExistingJenkinsUser && Strings.isNullOrEmpty(adminUser)) {
-            adminUser = getJenkinsUser();
-        }
-        if (!Strings.isNullOrEmpty(vmPassword)) {
-            LoginCredentials lc = LoginCredentials.builder().user(adminUser).password(vmPassword).build();
-            options.overrideLoginCredentials(lc);
-        } else if (!Strings.isNullOrEmpty(getCloud().privateKey) && !Strings.isNullOrEmpty(adminUser)) {
-            // Skip overriding the credentials if we don't have a VM admin user specified - there are cases where we want the private
-            // key but we don't to use it for the admin user creds.
-            LoginCredentials lc = LoginCredentials.builder().user(adminUser).privateKey(getCloud().privateKey).build();
-            options.overrideLoginCredentials(lc);
+        if (null != adminCredentialsId) {
+            String adminUser = getAdminUser();
+            StandardUsernameCredentials c = SSHLauncher.lookupSystemCredentials(adminCredentialsId);
+            if (null != c) {
+                if (c instanceof StandardUsernamePasswordCredentials) {
+                    String password = ((StandardUsernamePasswordCredentials)c).getPassword().toString();
+                    LoginCredentials lc = LoginCredentials.builder().user(adminUser).password(password).build();
+                    options.overrideLoginCredentials(lc);
+                } else {
+                    String privateKey = ((SSHUserPrivateKey)c).getPrivateKey();
+                    LoginCredentials lc = LoginCredentials.builder().user(adminUser).privateKey(privateKey).build();
+                    options.overrideLoginCredentials(lc);
+                }
+            }
         }
 
         if (spoolDelayMs > 0) {
@@ -312,41 +385,27 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
         }
 
         Statement initStatement = null;
-        Statement bootstrap = null;
 
         if (this.preExistingJenkinsUser) {
             if (this.initScript.length() > 0) {
                 initStatement = Statements.exec(this.initScript);
             }
         } else {
-            // setup the jcloudTemplate to customize the nodeMetadata with jdk, etc. also opening ports
+            // provision jenkins user
             AdminAccess adminAccess = AdminAccess.builder().adminUsername(getJenkinsUser())
-                    .installAdminPrivateKey(installPrivateKey) // some VCS such as Git use SSH authentication
-                    .grantSudoToAdminUser(allowSudo) // no need
-                    .adminPrivateKey(getCloud().privateKey) // temporary due to jclouds bug
-                    .authorizeAdminPublicKey(true).adminPublicKey(getCloud().publicKey).adminHome(getFsRoot()).build();
-
+                .installAdminPrivateKey(installPrivateKey) // some VCS such as Git use SSH authentication
+                .grantSudoToAdminUser(allowSudo) // no need
+                .adminPrivateKey(getJenkinsPrivateKey()) // temporary due to jclouds bug
+                .authorizeAdminPublicKey(true).adminPublicKey(getJenkinsPublicKey()).adminHome(getFsRoot()).build();
             // Jenkins needs /jenkins dir.
             Statement jenkinsDirStatement = newStatementList(Statements.exec("mkdir -p " + getFsRoot()),
                     Statements.exec("chown " + getJenkinsUser() + " " + getFsRoot()));
-
             initStatement = newStatementList(adminAccess, jenkinsDirStatement, Statements.exec(this.initScript));
         }
-
-        if (preInstalledJava) {
-            bootstrap = initStatement;
-        } else {
-            if (null == initStatement) {
-                bootstrap = newStatementList(InstallJDK.fromOpenJDK());
-            } else {
-                bootstrap = newStatementList(initStatement, InstallJDK.fromOpenJDK());
-            }
-        }
-
         options.inboundPorts(22).userMetadata(userMetadata);
 
-        if (bootstrap != null) {
-            options.runScript(bootstrap);
+        if (null != initStatement) {
+            options.runScript(initStatement);
         }
 
         if (userData != null) {
@@ -436,10 +495,14 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             return FormValidation.validatePositiveInteger(value);
         }
 
-        public FormValidation doValidateImageId(@QueryParameter String providerName, @QueryParameter String identity, @QueryParameter String credential,
-                                                @QueryParameter String endPointUrl, @QueryParameter String imageId, @QueryParameter String zones) {
+        public FormValidation doCheckCredentialsId(@QueryParameter String value) {
+            return FormValidation.validateRequired(value);
+        }
 
-            final FormValidation computeContextValidationResult = validateComputeContextParameters(providerName, identity, credential, endPointUrl, zones);
+        public FormValidation doValidateImageId(@QueryParameter String providerName, @QueryParameter String cloudManagerKeyId,
+                @QueryParameter String endPointUrl, @QueryParameter String imageId, @QueryParameter String zones) {
+
+            final FormValidation computeContextValidationResult = validateComputeContextParameters(providerName, cloudManagerKeyId, endPointUrl, zones);
             if (computeContextValidationResult != null) {
                 return computeContextValidationResult;
             }
@@ -451,7 +514,10 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             imageId = Util.fixEmptyAndTrim(imageId);
 
             try {
-                final Set<? extends Image> images = listImages(providerName, identity, Secret.fromString(credential).getPlainText(), endPointUrl, zones);
+                final String identity = JCloudsCloud.getKeyUsername(cloudManagerKeyId);
+                final String credential = JCloudsCloud.getKeyPassword(cloudManagerKeyId);
+
+                final Set<? extends Image> images = listImages(providerName, identity, credential, endPointUrl, zones);
                 if (images != null) {
                     for (final Image image : images) {
                         if (!image.getId().equals(imageId)) {
@@ -469,10 +535,10 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             return FormValidation.error("Invalid Image Id, please check the value and try again.");
         }
 
-        public FormValidation doValidateImageNameRegex(@QueryParameter String providerName, @QueryParameter String identity, @QueryParameter String credential,
-                                                       @QueryParameter String endPointUrl, @QueryParameter String imageNameRegex, @QueryParameter String zones) {
+        public FormValidation doValidateImageNameRegex(@QueryParameter String providerName, @QueryParameter String cloudManagerKeyId,
+                @QueryParameter String endPointUrl, @QueryParameter String imageNameRegex, @QueryParameter String zones) {
 
-            final FormValidation computeContextValidationResult = validateComputeContextParameters(providerName, identity, Secret.fromString(credential).getPlainText(), endPointUrl, zones);
+            final FormValidation computeContextValidationResult = validateComputeContextParameters(providerName, cloudManagerKeyId, endPointUrl, zones);
             if (computeContextValidationResult != null) {
                 return computeContextValidationResult;
             }
@@ -484,7 +550,10 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             imageNameRegex = Util.fixEmptyAndTrim(imageNameRegex);
 
             try {
-                final Set<? extends Image> images = listImages(providerName, identity, Secret.fromString(credential).getPlainText(), endPointUrl, zones);
+                final String identity = JCloudsCloud.getKeyUsername(cloudManagerKeyId);
+                final String credential = JCloudsCloud.getKeyPassword(cloudManagerKeyId);
+
+                final Set<? extends Image> images = listImages(providerName, identity, credential, endPointUrl, zones);
                 if (images != null) {
                     for (final Image image : images) {
                         if (image.getName().matches(imageNameRegex)) {
@@ -498,13 +567,10 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             return FormValidation.error("Invalid Image Name Regex, please check the value and try again.");
         }
 
-        private FormValidation validateComputeContextParameters(@QueryParameter String providerName, @QueryParameter String identity,
-                                                                @QueryParameter String credential, @QueryParameter String endPointUrl, @QueryParameter String zones) {
-            if (Strings.isNullOrEmpty(identity)) {
-                return FormValidation.error("Invalid identity (AccessId).");
-            }
-            if (Strings.isNullOrEmpty(credential)) {
-                return FormValidation.error("Invalid credential (secret key).");
+        private FormValidation validateComputeContextParameters(@QueryParameter String providerName, @QueryParameter String cloudManagerKeyId,
+                @QueryParameter String endPointUrl, @QueryParameter String zones) {
+            if (null == Util.fixEmptyAndTrim(cloudManagerKeyId)) {
+                return FormValidation.error("Invalid credentials.");
             }
             if (Strings.isNullOrEmpty(providerName)) {
                 return FormValidation.error("Provider Name shouldn't be empty");
@@ -516,8 +582,6 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
         private Set<? extends Image> listImages(String providerName, String identity, String credential, String endPointUrl, String zones) {
             // Remove empty text/whitespace from the fields.
             providerName = Util.fixEmptyAndTrim(providerName);
-            identity = Util.fixEmptyAndTrim(identity);
-            credential = Secret.fromString(credential).getPlainText();
             endPointUrl = Util.fixEmptyAndTrim(endPointUrl);
             zones = Util.fixEmptyAndTrim(zones);
             ComputeService computeService = null;
@@ -532,20 +596,16 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             }
         }
 
-        public ListBoxModel doFillHardwareIdItems(@RelativePath("..") @QueryParameter String providerName, @RelativePath("..") @QueryParameter String identity,
-                                                  @RelativePath("..") @QueryParameter String credential, @RelativePath("..") @QueryParameter String endPointUrl,
-                                                  @RelativePath("..") @QueryParameter String zones) {
+        public ListBoxModel doFillHardwareIdItems(@RelativePath("..") @QueryParameter String providerName, @RelativePath("..") @QueryParameter String cloudManagerKeyId,
+                @RelativePath("..") @QueryParameter String endPointUrl, @RelativePath("..") @QueryParameter String zones) {
 
             ListBoxModel m = new ListBoxModel();
 
-            if (Strings.isNullOrEmpty(identity)) {
-                LOGGER.warning("identity is null or empty");
+            if (null == Util.fixEmptyAndTrim(cloudManagerKeyId)) {
+                LOGGER.warning("Invalid credentials.");
                 return m;
             }
-            if (Strings.isNullOrEmpty(credential)) {
-                LOGGER.warning("credential is null or empty");
-                return m;
-            }
+
             if (Strings.isNullOrEmpty(providerName)) {
                 LOGGER.warning("providerName is null or empty");
                 return m;
@@ -553,8 +613,8 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
 
             // Remove empty text/whitespace from the fields.
             providerName = Util.fixEmptyAndTrim(providerName);
-            identity = Util.fixEmptyAndTrim(identity);
-            credential = Secret.fromString(credential).getPlainText();
+            final String identity = JCloudsCloud.getKeyUsername(cloudManagerKeyId);
+            final String credential = JCloudsCloud.getKeyPassword(cloudManagerKeyId);
             endPointUrl = Util.fixEmptyAndTrim(endPointUrl);
 
             ComputeService computeService = null;
@@ -580,14 +640,11 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             return m;
         }
 
-        public FormValidation doValidateHardwareId(@QueryParameter String providerName, @QueryParameter String identity, @QueryParameter String credential,
-                                                   @QueryParameter String endPointUrl, @QueryParameter String hardwareId, @QueryParameter String zones) {
+        public FormValidation doValidateHardwareId(@QueryParameter String providerName, @QueryParameter String cloudManagerKeyId,
+                @QueryParameter String endPointUrl, @QueryParameter String hardwareId, @QueryParameter String zones) {
 
-            if (Strings.isNullOrEmpty(identity)) {
-                return FormValidation.error("Invalid identity (AccessId).");
-            }
-            if (Strings.isNullOrEmpty(credential)) {
-                return FormValidation.error("Invalid credential (secret key).");
+            if (null == Util.fixEmptyAndTrim(cloudManagerKeyId)) {
+                return FormValidation.error("Invalid credentials.");
             }
             if (Strings.isNullOrEmpty(providerName)) {
                 return FormValidation.error("Provider Name shouldn't be empty");
@@ -598,8 +655,8 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
 
             // Remove empty text/whitespace from the fields.
             providerName = Util.fixEmptyAndTrim(providerName);
-            identity = Util.fixEmptyAndTrim(identity);
-            credential = Secret.fromString(credential).getPlainText();
+            final String identity = JCloudsCloud.getKeyUsername(cloudManagerKeyId);
+            final String credential = JCloudsCloud.getKeyPassword(cloudManagerKeyId);
             hardwareId = Util.fixEmptyAndTrim(hardwareId);
             endPointUrl = Util.fixEmptyAndTrim(endPointUrl);
             zones = Util.fixEmptyAndTrim(zones);
@@ -630,18 +687,13 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             return result;
         }
 
-        public ListBoxModel doFillLocationIdItems(@RelativePath("..") @QueryParameter String providerName, @RelativePath("..") @QueryParameter String identity,
-                                                  @RelativePath("..") @QueryParameter String credential, @RelativePath("..") @QueryParameter String endPointUrl,
-                                                  @RelativePath("..") @QueryParameter String zones) {
+        public ListBoxModel doFillLocationIdItems(@RelativePath("..") @QueryParameter String providerName, @RelativePath("..") @QueryParameter String cloudManagerKeyId,
+                @RelativePath("..") @QueryParameter String endPointUrl, @RelativePath("..") @QueryParameter String zones) {
 
             ListBoxModel m = new ListBoxModel();
 
-            if (Strings.isNullOrEmpty(identity)) {
-                LOGGER.warning("identity is null or empty");
-                return m;
-            }
-            if (Strings.isNullOrEmpty(credential)) {
-                LOGGER.warning("credential is null or empty");
+            if (null == Util.fixEmptyAndTrim(cloudManagerKeyId)) {
+                LOGGER.warning("Invalid credentials.");
                 return m;
             }
             if (Strings.isNullOrEmpty(providerName)) {
@@ -651,8 +703,8 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
 
             // Remove empty text/whitespace from the fields.
             providerName = Util.fixEmptyAndTrim(providerName);
-            identity = Util.fixEmptyAndTrim(identity);
-            credential = Secret.fromString(credential).getPlainText();
+            final String identity = JCloudsCloud.getKeyUsername(cloudManagerKeyId);
+            final String credential = JCloudsCloud.getKeyPassword(cloudManagerKeyId);
             endPointUrl = Util.fixEmptyAndTrim(endPointUrl);
 
             ComputeService computeService = null;
@@ -689,18 +741,25 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             }
             return new StandardUsernameListBoxModel().withMatching(SSHAuthenticator.matcher(Connection.class),
                     CredentialsProvider.lookupCredentials(StandardUsernameCredentials.class, context,
-                            ACL.SYSTEM, SSHLauncher.SSH_SCHEME));
+                        ACL.SYSTEM, SSHLauncher.SSH_SCHEME));
         }
 
-        public FormValidation doValidateLocationId(@QueryParameter String providerName, @QueryParameter String identity, @QueryParameter String credential,
-                                                   @QueryParameter String endPointUrl, @QueryParameter String locationId, @QueryParameter String zones) {
+        public ListBoxModel doFillAdminCredentialsIdItems(@AncestorInPath ItemGroup context) {
+            if (!(context instanceof AccessControlled ? (AccessControlled) context : Jenkins.getInstance()).hasPermission(Computer.CONFIGURE)) {
+                return new ListBoxModel();
+            }
+            return new StandardUsernameListBoxModel().withEmptySelection().withMatching(SSHAuthenticator.matcher(Connection.class),
+                    CredentialsProvider.lookupCredentials(StandardUsernameCredentials.class, context,
+                        ACL.SYSTEM, SSHLauncher.SSH_SCHEME));
+        }
 
-            if (Strings.isNullOrEmpty(identity)) {
-                return FormValidation.error("Invalid identity (AccessId).");
+        public FormValidation doValidateLocationId(@QueryParameter String providerName, @QueryParameter String cloudManagerKeyId,
+                @QueryParameter String endPointUrl, @QueryParameter String locationId, @QueryParameter String zones) {
+
+            if (null == Util.fixEmptyAndTrim(cloudManagerKeyId)) {
+                return FormValidation.error("Invalid credentials.");
             }
-            if (Strings.isNullOrEmpty(credential)) {
-                return FormValidation.error("Invalid credential (secret key).");
-            }
+
             if (Strings.isNullOrEmpty(providerName)) {
                 return FormValidation.error("Provider Name shouldn't be empty");
             }
@@ -711,8 +770,8 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
 
             // Remove empty text/whitespace from the fields.
             providerName = Util.fixEmptyAndTrim(providerName);
-            identity = Util.fixEmptyAndTrim(identity);
-            credential = Util.fixEmptyAndTrim(credential);
+            final String identity = JCloudsCloud.getKeyUsername(cloudManagerKeyId);
+            final String credential = JCloudsCloud.getKeyPassword(cloudManagerKeyId);
             locationId = Util.fixEmptyAndTrim(locationId);
             endPointUrl = Util.fixEmptyAndTrim(endPointUrl);
             zones = Util.fixEmptyAndTrim(zones);
@@ -757,4 +816,142 @@ public class JCloudsSlaveTemplate implements Describable<JCloudsSlaveTemplate>, 
             return FormValidation.validateNonNegativeInteger(value);
         }
     }
+
+    void upgrade() {
+        try {
+            final String description = "JClouds cloud " + getCloud().name + "." + name + " - auto-migrated";
+            String ju = getJenkinsUser();
+            if (Strings.isNullOrEmpty(getCredentialsId()) && !Strings.isNullOrEmpty(ju)) {
+                setCredentialsId(convertJenkinsUser(ju, description, getCloud().getGlobalPrivateKey()));
+                jenkinsUser = null; // Not used anymore, but retained for backward compatibility.
+            }
+            if (Strings.isNullOrEmpty(getAdminCredentialsId())) {
+                StandardUsernameCredentials u = null;
+                String au = getAdminUser();
+                if (Strings.isNullOrEmpty(vmPassword)) {
+                    // If the username is "root", we use the global key directly,
+                    // otherwise create a separate SSHPrivateKey credential
+                    if (!au.equals("root")) {
+                        String privateKey = getCloud().getGlobalPrivateKey();
+                        u = new BasicSSHUserPrivateKey(CredentialsScope.SYSTEM, null, au,
+                                new BasicSSHUserPrivateKey.DirectEntryPrivateKeySource(privateKey), null, description);
+                    }
+                } else {
+                    // Create a Username/Password credential.
+                    u = new UsernamePasswordCredentialsImpl(
+                            CredentialsScope.SYSTEM, null, description, au, vmPassword);
+                }
+                setAdminCredentialsId(storeCredentials(u));
+            }
+        } catch (Exception e) {
+            LOGGER.log(Level.SEVERE, e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    private String storeCredentials(final StandardUsernameCredentials u) {
+        if (null != u) {
+            final SecurityContext previousContext = ACL.impersonate(ACL.SYSTEM);
+            try {
+                CredentialsStore s = CredentialsProvider.lookupStores(Jenkins.getInstance()).iterator().next();
+                try {
+                    s.addCredentials(Domain.global(), u);
+                    return u.getId();
+                } catch (IOException e) {
+                    // ignore
+                }
+            } finally {
+                SecurityContextHolder.setContext(previousContext);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Creates a new SSH credential for the jenkins user.
+     * If a record with the same username and private key already exists, only the id of the existing record is returned.
+     * @param user The username.
+     * @param cloud The name of the cloud.
+     * @param template The name of the slave template.
+     * @param privateKey The privateKey.
+     * @return The Id of the ssh-credential-plugin record (either newly created or already existing).
+     */
+    private String convertJenkinsUser(final String user, final String  description, final String privateKey) {
+        StandardUsernameCredentials u = retrieveExistingCredentials(user, privateKey);
+        if (null == u) {
+            u = new BasicSSHUserPrivateKey(CredentialsScope.SYSTEM, null, user,
+                    new BasicSSHUserPrivateKey.DirectEntryPrivateKeySource(privateKey), null, description);
+            return storeCredentials(u);
+        }
+        return u.getId();
+    }
+
+    private StandardUsernameCredentials retrieveExistingCredentials(final String username, final String privkey) {
+        return CredentialsMatchers.firstOrNull(CredentialsProvider.lookupCredentials(SSHUserPrivateKey.class,
+                    Hudson.getInstance(), ACL.SYSTEM, SSHLauncher.SSH_SCHEME), CredentialsMatchers.allOf(
+                    CredentialsMatchers.withUsername(username),
+                    new CredentialsMatcher() {
+                        public boolean matches(Credentials item) {
+                            for (String key : SSHUserPrivateKey.class.cast(item).getPrivateKeys()) {
+                                if (pemKeyEquals(key, privkey)) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                    }));
+    }
+
+    /**
+     * Compares two SSH private keys.
+     * There are two levels of comparison: the first is a simple string comparison with all whitespace
+     * removed. If that fails then the Base64 decoded bytes of the first PEM entity will be compared
+     * (to allow for comments in the key outside the PEM boundaries).
+     *
+     * @param key1 the first key
+     * @param key2 the second key
+     * @return {@code true} if they two keys are the same.
+     */
+    private boolean pemKeyEquals(String key1, String key2) {
+        key1 = StringUtils.trim(key1);
+        key2 = StringUtils.trim(key2);
+        return key1.replaceAll("\\s+", "").equals(key2.replace("\\s+", ""))
+            || Arrays.equals(quickNDirtyExtract(key1), quickNDirtyExtract(key2));
+    }
+
+    /**
+     * Extract the bytes of the first PEM encoded key in a string. This is a quick and dirty method just to
+     * establish if two keys are equal, we do not do any serious decoding of the key and this method could give "issues"
+     * but should be very unlikely to result in a false positive match.
+     *
+     * @param key the key to extract.
+     * @return the base64 decoded bytes from the key after discarding the key type and any header information.
+     */
+    private byte[] quickNDirtyExtract(String key) {
+        StringBuilder builder = new StringBuilder(key.length());
+        boolean begin = false;
+        boolean header = false;
+        for (String line : StringUtils.split(key, "\n")) {
+            line = line.trim();
+            if (line.startsWith("---") && line.endsWith("---")) {
+                if (begin && line.contains("---END")) {
+                    break;
+                }
+                if (!begin && line.contains("---BEGIN")) {
+                    header = true;
+                    begin = true;
+                    continue;
+                }
+            }
+            if (StringUtils.isBlank(line)) {
+                header = false;
+                continue;
+            }
+            if (!header) {
+                builder.append(line);
+            }
+        }
+        return Base64.decodeBase64(builder.toString());
+    }
+
 }
